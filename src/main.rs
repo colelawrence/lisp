@@ -7,8 +7,6 @@ extern "C" {
     fn tree_sitter_lisp() -> Language;
 }
 
-const LISP_EXAMPLE: &'static str = r#"(+ 2 3 (- 20 10))"#;
-
 #[derive(Debug)]
 struct Span<T> {
     node: T,
@@ -32,7 +30,7 @@ impl<T> Span<T> {
 enum Node {
     Call(Span<Call>),
     List(Span<List>),
-    Number(Span<usize>),
+    Number(Span<i64>),
     String(Span<String>),
     Identifier(Span<String>),
 }
@@ -54,6 +52,12 @@ struct SourceFile {
     definitions: Vec<Span<Call>>,
 }
 
+const LISP_EXAMPLE: &'static str = r#"
+(+ 2 3 (- 20 10))
+(+ 2 (- 20 10 300))
+(+ (- 20 10))
+"#;
+
 fn main() {
     let mut parser = Parser::new();
 
@@ -63,9 +67,78 @@ fn main() {
     let tree = parser.parse(LISP_EXAMPLE, None).unwrap();
 
     match parse_source_file(LISP_EXAMPLE.to_string(), &tree.root_node()) {
-        Ok(ast) => println!("TODO: Implement interpreter\n{:?}", ast),
+        Ok(Span {
+            node: SourceFile { definitions, .. },
+            ..
+        }) => {
+            for def in definitions.into_iter() {
+                let end = def.end;
+                let start = def.start;
+                let node_span = Span {
+                    end,
+                    start,
+                    file: def.file,
+                    node: Node::Call(def),
+                };
+                let source_code = &LISP_EXAMPLE[start..end];
+                println!("Found:\n{}\n{:?}", source_code, interpret(&Rc::new(node_span)));
+            }
+        }
         Err(message) => panic!("ERROR: {:?}", message),
     }
+}
+
+#[derive(Clone, Debug)]
+enum RuntimeValue {
+    Num(i64),
+    Str(String),
+}
+
+fn interpret(ast: &Rc<Span<Node>>) -> RuntimeValue {
+    let node = &ast.node;
+    match node {
+        Node::Call(call) => handle_call(call),
+        Node::Number(num) => handle_number(num),
+        unknown => panic!("Unexpected node {:?}", unknown),
+    }
+}
+
+fn handle_call(ast: &Span<Call>) -> RuntimeValue {
+    let Span { node, .. } = ast;
+    let Call {
+        name: Span { node: name, .. },
+        params,
+    } = node;
+
+    let mut nums = params
+        .into_iter()
+        .map(|sp_node| interpret(&sp_node))
+        .filter_map(|rt_val| match rt_val {
+            RuntimeValue::Num(num) => Some(num),
+            _ => None,
+        });
+
+    let val = match name.as_ref() {
+        "+" => {
+            let sum: i64 = nums.sum();
+            sum
+        }
+        "-" => {
+            let first_opt = nums.next();
+            let others: i64 = nums.sum();
+            match first_opt {
+                Some(first) => first - others,
+                None => 0,
+            }
+        }
+        other => panic!("Unknown operator {:?}", other),
+    };
+    RuntimeValue::Num(val)
+}
+
+fn handle_number(ast: &Span<i64>) -> RuntimeValue {
+    let Span { node, .. } = ast;
+    RuntimeValue::Num(*node)
 }
 
 type ParseResult<T> = Result<Span<T>, Span<String>>;
@@ -221,7 +294,7 @@ impl SourceContext {
         }
     }
 
-    fn parse_number(&mut self, node: &tree_sitter::Node) -> ParseResult<usize> {
+    fn parse_number(&mut self, node: &tree_sitter::Node) -> ParseResult<i64> {
         use std::str::FromStr;
         if node.kind() != "number" {
             self.err(
@@ -233,9 +306,10 @@ impl SourceContext {
             )
         } else {
             let num = &self.source[node.start_byte()..node.end_byte()];
+            // 56'556
             self.ok(
                 node,
-                usize::from_str(&num.replace('\'', ""))
+                i64::from_str(&num.replace('\'', ""))
                     .map_err(|_| self.span(node, "Failed to parse number".to_string()))?,
             )
         }
